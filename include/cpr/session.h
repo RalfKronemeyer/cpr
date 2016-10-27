@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 
 #include "auth.h"
 #include "body.h"
@@ -19,6 +20,18 @@
 #include "low_speed.h"
 
 namespace cpr {
+
+
+	using BodyReceiverFunc = std::function<bool(const std::vector<uint8_t>&)>;
+
+	class BodyReceiver
+	{
+	public:
+		BodyReceiver();
+		BodyReceiver(BodyReceiverFunc bodyReceiverFunc);
+		BodyReceiverFunc BodyReceiverFunc_ = nullptr;
+	};
+
 
 class Session {
   public:
@@ -65,6 +78,8 @@ class Session {
     void SetOption(Body&& body);
     void SetOption(const Body& body);
     void SetOption(const LowSpeed& low_speed);
+
+	void SetOption(BodyReceiver body_receiver);
 
     Response Delete();
     Response Get();

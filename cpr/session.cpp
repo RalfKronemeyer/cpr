@@ -35,6 +35,8 @@ class Session::Impl {
     void SetBody(const Body& body);
     void SetLowSpeed(const LowSpeed& low_speed);
 
+	void SetBodyReceiver(const BodyReceiver bodyReceiver);
+
     Response Delete();
     Response Get();
     Response Head();
@@ -42,14 +44,23 @@ class Session::Impl {
     Response Patch();
     Response Post();
     Response Put();
-
-  private:
+private:
     std::unique_ptr<CurlHolder, std::function<void(CurlHolder*)>> curl_;
     Url url_;
     Parameters parameters_;
     Proxies proxies_;
 
-    Response makeRequest(CURL* curl);
+	std::string header_string{};
+	std::string response_string{};
+
+	std::pair<Session::Impl*, std::string*>  response_pair_;
+	std::pair<Session::Impl*, std::string*>  header_pair_;
+
+	//std::chrono::milliseconds timeoutForBodyReceiver_ {};// =std::chrono::milliseconds(0);;
+
+	BodyReceiver bodyReceiver_;
+	static size_t writeFunction(void* ptr, size_t size, size_t nmemb, std::pair<Session::Impl*, std::string*>& session_string_pair);
+	Response makeRequest(CURL* curl);
     static void freeHolder(CurlHolder* holder);
     static CurlHolder* newHolder();
 };
@@ -131,8 +142,17 @@ void Session::Impl::SetHeader(const Header& header) {
 void Session::Impl::SetTimeout(const Timeout& timeout) {
     auto curl = curl_->handle;
     if (curl) {
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout.Milliseconds());
-    }
+		//timeoutForBodyReceiver_ = timeout.ms;
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout.Milliseconds());
+		if (bodyReceiver_.BodyReceiverFunc_ == nullptr)
+		{
+			curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout.Milliseconds());
+		}
+		else
+		{
+			
+		}
+	}
 }
 
 void Session::Impl::SetAuth(const Authentication& auth) {
@@ -286,7 +306,16 @@ void Session::Impl::SetLowSpeed(const LowSpeed& low_speed) {
     }
 }
 
-Response Session::Impl::Delete() {
+	void Session::Impl::SetBodyReceiver(const BodyReceiver bodyReceiver)
+	{
+		bodyReceiver_ = bodyReceiver;
+		if (bodyReceiver_.BodyReceiverFunc_!=nullptr)
+		{
+			curl_easy_setopt(curl_->handle, CURLOPT_TIMEOUT_MS, 0);
+		}
+	}
+
+	Response Session::Impl::Delete() {
     auto curl = curl_->handle;
     if (curl) {
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 0L);
@@ -362,6 +391,44 @@ Response Session::Impl::Put() {
     return makeRequest(curl);
 }
 
+size_t Session::Impl::writeFunction(void* ptr, size_t size, size_t nmemb, std::pair<Session::Impl*, std::string*>& session_string_pair)
+{
+	auto session=session_string_pair.first;
+	if (&session->header_string == session_string_pair.second)
+	{
+		//Header
+		auto data = session_string_pair.second;
+		data->append(static_cast<char*>(ptr), size * nmemb);
+		return size * nmemb;
+	}
+	else //	if (&session->response_string == session_string_pair.second)
+	{
+		//Body
+
+		if (session->bodyReceiver_.BodyReceiverFunc_!=nullptr)
+		{
+			curl_easy_setopt(&*session->curl_, CURLOPT_TIMEOUT_MS, 1000);
+
+			auto bytesPtr = static_cast<uint8_t*>(ptr);
+			std::vector<uint8_t> bytes(bytesPtr, bytesPtr + size*nmemb);
+			if (session->bodyReceiver_.BodyReceiverFunc_(bytes))
+			{
+				//ToDo break
+				//curl_easy_reset(&*session->curl_);
+				return 0;
+			}
+			
+		}
+		else
+		{
+			auto data = session_string_pair.second;
+			data->append(static_cast<char*>(ptr), size * nmemb);
+		}
+		return size * nmemb;
+	}
+}
+
+
 Response Session::Impl::makeRequest(CURL* curl) {
     if (!parameters_.content.empty()) {
         Url new_url{url_ + "?" + parameters_.content};
@@ -379,11 +446,12 @@ Response Session::Impl::makeRequest(CURL* curl) {
 
     curl_->error[0] = '\0';
 
-    std::string response_string;
-    std::string header_string;
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cpr::util::writeFunction);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_string);
+	header_pair_ = std::pair<Session::Impl*, std::string*>{ this, &header_string };
+	response_pair_ = std::pair<Session::Impl*, std::string*>(this, &response_string);
+
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &Session::Impl::writeFunction);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_pair_);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_pair_);
 
     auto curl_error = curl_easy_perform(curl);
 
@@ -411,6 +479,17 @@ Response Session::Impl::makeRequest(CURL* curl) {
     return Response{static_cast<std::int32_t>(response_code),
         response_string, header, raw_url, elapsed, cookies, error};
 }
+
+BodyReceiver::BodyReceiver()
+{
+	
+}
+
+BodyReceiver::BodyReceiver(BodyReceiverFunc bodyReceiverFunc):BodyReceiverFunc_(bodyReceiverFunc)
+{
+	
+}
+
 
 // clang-format off
 Session::Session() : pimpl_{ new Impl{} } {}
@@ -453,6 +532,9 @@ void Session::SetOption(const Cookies& cookies) { pimpl_->SetCookies(cookies); }
 void Session::SetOption(const Body& body) { pimpl_->SetBody(body); }
 void Session::SetOption(Body&& body) { pimpl_->SetBody(std::move(body)); }
 void Session::SetOption(const LowSpeed& low_speed) { pimpl_->SetLowSpeed(low_speed); }
+void Session::SetOption(BodyReceiver body_receiver) { pimpl_->SetBodyReceiver(body_receiver); }
+
+
 Response Session::Delete() { return pimpl_->Delete(); }
 Response Session::Get() { return pimpl_->Get(); }
 Response Session::Head() { return pimpl_->Head(); }
